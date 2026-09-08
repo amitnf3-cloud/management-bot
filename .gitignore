@@ -1,5 +1,7 @@
 .env
 *.db
 *.xlsx
+*.csv
+*.pem
 __pycache__/
 *.pyc

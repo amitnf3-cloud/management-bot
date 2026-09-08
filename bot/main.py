@@ -1,6 +1,5 @@
 """
 בוט טלגרם לניהול חתימות ציוד - צנחנים
-תפריט מונחה: החתמה / זיכוי / דוח מחלקה
 """
 import os
 import sys
@@ -21,21 +20,20 @@ from db import operations as ops
 from db.excel_export import build_full_report
 from bot import access
 
-# טוען את הטוקן מקובץ .env (לא מקודד בתוך הקוד עצמו)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------
-# מצבי השיחה (Conversation States)
+# מצבי השיחה
 # ------------------------------------------------
-CHOOSE_ACTION, CHOOSE_PLATOON, CHOOSE_SOLDIER, CHOOSE_ITEM, CHOOSE_QTY, ADD_SOLDIER_NAME, ADD_SOLDIER_PLATOON = range(7)
+(CHOOSE_ACTION, CHOOSE_PLATOON, CHOOSE_SOLDIER, CHOOSE_ITEM, CHOOSE_QTY,
+ ADD_SOLDIER_NAME, ADD_SOLDIER_PLATOON, REMOVE_SOLDIER_CONFIRM) = range(8)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN לא נמצא - ודא שקובץ .env קיים ומכיל BOT_TOKEN=...")
-
 
 MAIN_MENU_BUTTON = [InlineKeyboardButton("🔄 פעולה נוספת / תפריט ראשי", callback_data="menu")]
 
@@ -63,20 +61,20 @@ KITS = {
 
 
 async def send_private_report(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str, kind: str):
-    """שולח דוח בהודעה פרטית, ומוחק את הדוח הקודם מאותו סוג (אם קיים) - כדי שהצ'אט יישאר נקי ומהיר"""
+    """שולח דוח בהודעה פרטית, ומוחק את הדוח הקודם מאותו סוג - הצ'אט נשאר נקי"""
     prev_id = context.user_data.get(f"last_msg_{kind}")
     if prev_id:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=prev_id)
         except Exception:
-            pass  # ההודעה כבר נמחקה/ישנה מדי - לא קריטי
+            pass
     msg = await context.bot.send_message(chat_id=user_id, text=text)
     context.user_data[f"last_msg_{kind}"] = msg.message_id
 
 
 async def send_private_document(context: ContextTypes.DEFAULT_TYPE, user_id: int, file_path: str,
                                  filename: str, caption: str, kind: str):
-    """שולח קובץ בהודעה פרטית, ומוחק את הקובץ הקודם מאותו סוג - אותו עיקרון כמו send_private_report"""
+    """שולח קובץ בהודעה פרטית, אותו עיקרון כמו send_private_report"""
     prev_id = context.user_data.get(f"last_msg_{kind}")
     if prev_id:
         try:
@@ -88,8 +86,10 @@ async def send_private_document(context: ContextTypes.DEFAULT_TYPE, user_id: int
     context.user_data[f"last_msg_{kind}"] = msg.message_id
 
 
+# ------------------------------------------------
+# תפריט ראשי
+# ------------------------------------------------
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, via_message=False):
-    """מציג את התפריט הראשי - גם בפעם הראשונה וגם בחזרה מכפתור"""
     user = update.effective_user
     tg_id = str(user.id)
     level = access.get_access_level(tg_id)
@@ -115,6 +115,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, via
         buttons.append([
             InlineKeyboardButton("📦 מצב מחסן", callback_data="warehouse"),
             InlineKeyboardButton("📥 ייצוא לאקסל", callback_data="export_excel"),
+        ])
+        buttons.append([
+            InlineKeyboardButton("🗑️ הסר חייל", callback_data="remove_soldier"),
         ])
 
     if via_message:
@@ -201,6 +204,17 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
         return ConversationHandler.END
 
+    if action == "remove_soldier":
+        if not access.can_edit(tg_id):
+            await query.edit_message_text("אין לך הרשאה לפעולה הזו.",
+                                           reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+            return ConversationHandler.END
+        buttons = [[InlineKeyboardButton(p["name"], callback_data=f"pl_{p['id']}")]
+                   for p in ops.get_platoons()]
+        buttons.append(MAIN_MENU_BUTTON)
+        await query.edit_message_text("הסרת חייל - בחר מחלקה:", reply_markup=InlineKeyboardMarkup(buttons))
+        return CHOOSE_PLATOON
+
     # issue / return - צריך לבחור חייל קודם
     if not access.can_edit(tg_id):
         await query.edit_message_text("אין לך הרשאה לפעולה הזו.",
@@ -222,13 +236,11 @@ async def choose_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
 
     if data.startswith("rp_"):
-        # דוח מחלקה מלא - מכיל שמות ופרטי ציוד, נשלח בפרטי בלבד
         platoon_id = int(data.split("_")[1])
         rows = ops.get_platoon_report(platoon_id)
         if not rows:
             text = "אין נתונים למחלקה זו עדיין."
         else:
-            # קיבוץ לפי חייל - שורה אחת לכל אחד, פריטים מופרדים בפסיקים
             grouped = {}
             for r in rows:
                 grouped.setdefault(r["full_name"], []).append(f"{r['item']} x{r['quantity']}")
@@ -240,7 +252,6 @@ async def choose_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if data.startswith("ms_"):
-        # דוח חוסרים - גם הוא מכיל שמות, נשלח בפרטי
         target = data.split("_", 1)[1]
         platoon_id = None if target == "all" else int(target)
         rows = ops.get_soldiers_with_nothing(platoon_id)
@@ -269,26 +280,6 @@ async def choose_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOOSE_SOLDIER
 
 
-async def add_soldier_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_soldier_name"] = update.message.text.strip()
-    buttons = [[InlineKeyboardButton(p["name"], callback_data=f"asp_{p['id']}")]
-               for p in ops.get_platoons()]
-    buttons.append(MAIN_MENU_BUTTON)
-    await update.message.reply_text("לאיזו מחלקה?", reply_markup=InlineKeyboardMarkup(buttons))
-    return ADD_SOLDIER_PLATOON
-
-
-async def add_soldier_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    platoon_id = int(query.data.split("_")[1])
-    name = context.user_data["new_soldier_name"]
-    ops.add_soldier(name, platoon_id)
-    await query.edit_message_text(f"✅ החייל {name} נוסף בהצלחה, חתום על 0 פריטים.",
-                                   reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
-    return ConversationHandler.END
-
-
 async def choose_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -296,8 +287,19 @@ async def choose_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["soldier_id"] = soldier_id
     action = context.user_data["action"]
 
+    if action == "remove_soldier":
+        name = ops.get_soldier_name(soldier_id)
+        buttons = [
+            [InlineKeyboardButton("✅ כן, הסר", callback_data=f"confirm_remove_{soldier_id}")],
+            [InlineKeyboardButton("❌ ביטול", callback_data="menu")],
+        ]
+        await query.edit_message_text(
+            f"בטוח שאתה רוצה להסיר את {name}?\nזה לא מוחק היסטוריה, רק מסמן אותו כלא-פעיל.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return REMOVE_SOLDIER_CONFIRM
+
     if action == "return":
-        # בזיכוי מציגים רק פריטים שהחייל בפועל מחזיק - מונע טעויות וטרחה מיותרת
         holdings = ops.get_soldier_holdings_with_ids(soldier_id)
         if not holdings:
             await query.edit_message_text(
@@ -308,7 +310,6 @@ async def choose_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [[InlineKeyboardButton(f"{h['name']} (יש: {h['quantity']})", callback_data=f"it_{h['id']}")]
                    for h in holdings]
     else:
-        # בהחתמה מציגים קודם את הערכות המהירות (קיטים), ואז את כל סוגי הציוד הבודדים
         kit_buttons = [[InlineKeyboardButton(kit["label"], callback_data=kit_id)]
                        for kit_id, kit in KITS.items()]
         items = ops.get_equipment_types(layer="personal")
@@ -321,13 +322,23 @@ async def choose_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOOSE_ITEM
 
 
+async def confirm_remove_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    soldier_id = int(query.data.split("_")[2])
+    name = ops.get_soldier_name(soldier_id)
+    ops.deactivate_soldier(soldier_id)
+    await query.edit_message_text(f"✅ {name} הוסר בהצלחה.",
+                                   reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+    return ConversationHandler.END
+
+
 async def choose_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
     if data in KITS:
-        # ערכה מהירה - מחתימים את כל הפריטים בבת אחת בכמויות שנקבעו מראש
         soldier_id = context.user_data["soldier_id"]
         tg_id = str(update.effective_user.id)
         performer_name = update.effective_user.full_name
@@ -388,6 +399,26 @@ async def choose_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def add_soldier_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_soldier_name"] = update.message.text.strip()
+    buttons = [[InlineKeyboardButton(p["name"], callback_data=f"asp_{p['id']}")]
+               for p in ops.get_platoons()]
+    buttons.append(MAIN_MENU_BUTTON)
+    await update.message.reply_text("לאיזו מחלקה?", reply_markup=InlineKeyboardMarkup(buttons))
+    return ADD_SOLDIER_PLATOON
+
+
+async def add_soldier_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    platoon_id = int(query.data.split("_")[1])
+    name = context.user_data["new_soldier_name"]
+    ops.add_soldier(name, platoon_id)
+    await query.edit_message_text(f"✅ החייל {name} נוסף בהצלחה, חתום על 0 פריטים.",
+                                   reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("בוטל.")
     return ConversationHandler.END
@@ -427,6 +458,10 @@ def main():
             ADD_SOLDIER_PLATOON: [
                 CallbackQueryHandler(back_to_menu, pattern="^menu$"),
                 CallbackQueryHandler(add_soldier_platoon),
+            ],
+            REMOVE_SOLDIER_CONFIRM: [
+                CallbackQueryHandler(back_to_menu, pattern="^menu$"),
+                CallbackQueryHandler(confirm_remove_soldier, pattern="^confirm_remove_"),
             ],
         },
         fallbacks=[

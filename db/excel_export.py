@@ -23,7 +23,6 @@ def build_full_report(output_path: str, layer: str = "personal"):
     wb.remove(wb.active)  # מסירים את הגיליון הריק שנוצר כברירת מחדל
 
     for platoon in platoons_data:
-        # שם גיליון מוגבל ל-31 תווים באקסל - השמות שלנו קצרים, לא בעיה בפועל
         ws = wb.create_sheet(title=platoon["platoon_name"][:31])
         ws.sheet_view.rightToLeft = True
 
