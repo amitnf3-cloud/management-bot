@@ -1,9 +1,3 @@
-"""
-בדיקת הרשאות משתמשים בבוט
-full      - אתה + 2 אנשים -> יכולים לזכות/להחתים בכל השכבות (אישי + פלוגתי)
-mefaleg   - אנשי מפל"ג -> גם שכבת הגדוד
-view_only - כולם (כולל 6 הסמלים) -> צפייה בלבד
-"""
 import sys
 from pathlib import Path
 from typing import Optional
@@ -15,13 +9,10 @@ ACCESS_LEVELS = ("full", "mefaleg", "view_only")
 
 
 def get_access_level(telegram_id: str) -> Optional[str]:
-    """מחזיר את רמת ההרשאה של המשתמש, או None אם הוא לא רשום בכלל"""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT access_level FROM bot_users WHERE telegram_id = %s", (str(telegram_id),)
-        )
+        cur.execute("SELECT access_level FROM bot_users WHERE telegram_id = %s", (str(telegram_id),))
         row = cur.fetchone()
         return row["access_level"] if row else None
     finally:
@@ -29,29 +20,21 @@ def get_access_level(telegram_id: str) -> Optional[str]:
 
 
 def can_edit(telegram_id: str) -> bool:
-    """האם המשתמש יכול לבצע החתמה/זיכוי (אישי + פלוגתי)"""
-    level = get_access_level(telegram_id)
-    return level in ("full", "mefaleg")
+    return get_access_level(telegram_id) in ("full", "mefaleg")
 
 
 def can_edit_battalion(telegram_id: str) -> bool:
-    """האם המשתמש יכול לערוך את שכבת הגדוד (רק מפל"ג)"""
     return get_access_level(telegram_id) == "mefaleg"
 
 
 def register_user(telegram_id: str, display_name: str, access_level: str):
-    """רישום משתמש חדש להרשאות"""
-    if access_level not in ACCESS_LEVELS:
-        raise ValueError(f"access_level must be one of {ACCESS_LEVELS}")
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO bot_users (telegram_id, display_name, access_level)
-               VALUES (%s, %s, %s)
-               ON CONFLICT(telegram_id) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   access_level = excluded.access_level""",
+            """INSERT INTO bot_users (telegram_id, display_name, access_level) VALUES (%s, %s, %s)
+               ON CONFLICT(telegram_id) DO UPDATE SET display_name = excluded.display_name,
+               access_level = excluded.access_level""",
             (str(telegram_id), display_name, access_level)
         )
         conn.commit()
