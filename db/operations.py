@@ -604,12 +604,29 @@ def get_soldier_name(soldier_id):
         conn.close()
 
 
-def deactivate_soldier(soldier_id):
+def deactivate_soldier(soldier_id, performed_by_tg_id=None, performed_by_name=None):
+    """הסרת חייל - מחזירה קודם את כל הציוד שהוא מחזיק למחסן (כמו זיכוי מלא),
+    ורק אז מסמנת אותו כלא-פעיל. בלי זה הציוד היה נשאר 'תקוע' לצמיתות."""
     conn = get_conn()
     try:
         cur = conn.cursor()
+        cur.execute(
+            "SELECT equipment_type_id, quantity FROM current_holdings WHERE soldier_id = %s",
+            (soldier_id,)
+        )
+        holdings = cur.fetchall()
+
+        for h in holdings:
+            cur.execute(
+                """INSERT INTO transactions
+                   (action, soldier_id, equipment_type_id, quantity, performed_by_tg_id, performed_by_name, notes)
+                   VALUES ('return', %s, %s, %s, %s, %s, 'הוחזר אוטומטית - הוסרת חייל')""",
+                (soldier_id, h["equipment_type_id"], h["quantity"], performed_by_tg_id, performed_by_name)
+            )
+
+        cur.execute("DELETE FROM current_holdings WHERE soldier_id = %s", (soldier_id,))
         cur.execute("UPDATE soldiers SET is_active = 0 WHERE id = %s", (soldier_id,))
         conn.commit()
-        return cur.rowcount
+        return len(holdings)
     finally:
         conn.close()

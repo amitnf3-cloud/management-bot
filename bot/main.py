@@ -554,9 +554,13 @@ async def confirm_remove_soldier(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     soldier_id = int(query.data.split("_")[2])
     name = ops.get_soldier_name(soldier_id)
-    ops.deactivate_soldier(soldier_id)
-    await query.edit_message_text(f"✅ {name} הוסר בהצלחה.",
-                                   reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+    tg_id = str(update.effective_user.id)
+    performer_name = update.effective_user.full_name
+    returned_count = ops.deactivate_soldier(soldier_id, tg_id, performer_name)
+    text = f"✅ {name} הוסר בהצלחה."
+    if returned_count:
+        text += f"\n📦 {returned_count} סוגי פריטים הוחזרו אוטומטית למחסן."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
     return ConversationHandler.END
 
 
