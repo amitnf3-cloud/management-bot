@@ -34,9 +34,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN לא נמצא - ודא שקובץ .env קיים ומכיל BOT_TOKEN=...")
 
-MAIN_MENU_BUTTON = [InlineKeyboardButton("🔄 פעולה נוספת / תפריט ראשי", callback_data="menu")]
+MAIN_MENU_BUTTON = [InlineKeyboardButton("🔄 תפריט ראשי", callback_data="menu")]
+CONTINUE_BUTTON = [InlineKeyboardButton("➕ עוד פריט לאותו חייל", callback_data="continue_soldier")]
+
+
+def _make_undo_button(action: str, soldier_id: int, item_id: int, qty: int):
+    """כפתור ביטול שנושא בתוכו את פרטי הפעולה המדויקת - כך שהוא תמיד מבטל
+    בדיוק את מה שהוא מציג, גם אם המשתמש כבר ביצע פעולות נוספות אחריו"""
+    return [InlineKeyboardButton(
+        "↩️ בטל פעולה זו",
+        callback_data=f"undo_{action}_{soldier_id}_{item_id}_{qty}"
+    )]
 
 ACTION_LABELS = {"issue": "החתמה", "return": "זיכוי", "shortage": "דיווח חוסר"}
+
+# פריטים שהכמות שלהם משתנה - רק בהם שואלים "כמה יחידות". כל השאר = 1 אוטומטית
+QTY_ITEMS = {"מחסניות", "בירכיות", "תוף"}
 
 KITS = {
     "kit_rifle": {
@@ -92,6 +105,57 @@ def _do_battalion_issue(context: ContextTypes.DEFAULT_TYPE, holder_id: int, tg_i
     return f"✅ נקלט מול הגדוד: {name} x{qty}{note}"
 
 
+def _build_item_buttons(action: str, soldier_id: int):
+    """בונה את כפתורי בחירת הפריט - קיטים+כל הרשימה בהחתמה, רק מוחזק בזיכוי/חוסר.
+    מחזיר None אם אין מה להציג (זיכוי/חוסר לחייל שלא מחזיק כלום)."""
+    if action in ("return", "shortage"):
+        holdings = ops.get_soldier_holdings_with_ids(soldier_id)
+        if not holdings:
+            return None
+        buttons = [[InlineKeyboardButton(f"{h['name']} (יש: {h['quantity']})", callback_data=f"it_{h['id']}")]
+                   for h in holdings]
+    else:
+        kit_buttons = [[InlineKeyboardButton(kit["label"], callback_data=kit_id)]
+                       for kit_id, kit in KITS.items()]
+        items = ops.get_equipment_types(layer="personal")
+        item_buttons = [[InlineKeyboardButton(i["name"], callback_data=f"it_{i['id']}")]
+                        for i in items]
+        buttons = kit_buttons + item_buttons
+    buttons.append(MAIN_MENU_BUTTON)
+    return buttons
+
+
+async def _finalize_item_action(update: Update, context: ContextTypes.DEFAULT_TYPE, qty: int):
+    query = update.callback_query
+    action = context.user_data["action"]
+    soldier_id = context.user_data["soldier_id"]
+    item_id = context.user_data["item_id"]
+    tg_id = str(update.effective_user.id)
+    performer_name = update.effective_user.full_name
+
+    undo_button = _make_undo_button(action, soldier_id, item_id, qty)
+    extra_buttons = [CONTINUE_BUTTON, undo_button, MAIN_MENU_BUTTON]
+
+    try:
+        if action == "issue":
+            ops.issue_equipment(soldier_id, item_id, qty, tg_id, performer_name)
+            text = f"✅ הוחתם בהצלחה ({qty} יח')"
+        elif action == "return":
+            ops.return_equipment(soldier_id, item_id, qty, tg_id, performer_name)
+            text = f"✅ זוכה בהצלחה ({qty} יח')"
+        elif action == "shortage":
+            ops.report_shortage(soldier_id, item_id, qty, tg_id, performer_name)
+            text = f"✅ דווח חוסר ({qty} יח') - יופיע בדוח החוסרים"
+        else:
+            text = "פעולה לא מזוהה."
+            extra_buttons = [MAIN_MENU_BUTTON]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(extra_buttons))
+    except ValueError as e:
+        await query.edit_message_text(f"❌ שגיאה: {e}", reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+
+    return ConversationHandler.END
+
+
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, via_message=False):
     user = update.effective_user
     tg_id = str(user.id)
@@ -105,35 +169,25 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, via
             await update.callback_query.edit_message_text(text)
         return ConversationHandler.END
 
-    buttons = [[InlineKeyboardButton("📊 דוח מחלקה", callback_data="report")]]
+    buttons = []
     if access.can_edit(tg_id):
-        buttons.insert(0, [
+        buttons.append([
             InlineKeyboardButton("📤 החתמה", callback_data="issue"),
             InlineKeyboardButton("📥 זיכוי", callback_data="return"),
         ])
         buttons.append([
-            InlineKeyboardButton("⚠️ דוח חוסרים", callback_data="missing"),
-            InlineKeyboardButton("🆘 דיווח חוסר", callback_data="shortage"),
+            InlineKeyboardButton("📊 דוח מחלקה", callback_data="report"),
+            InlineKeyboardButton("⚠️ חוסרים", callback_data="sub_shortage"),
         ])
         buttons.append([
-            InlineKeyboardButton("➕ הוסף חייל", callback_data="add_soldier"),
-            InlineKeyboardButton("🗑️ הסר חייל", callback_data="remove_soldier"),
+            InlineKeyboardButton("👥 ניהול חיילים", callback_data="sub_soldiers"),
+            InlineKeyboardButton("🎖️ מול הגדוד", callback_data="sub_battalion"),
         ])
         buttons.append([
-            InlineKeyboardButton("📦 מצב מחסן", callback_data="warehouse"),
-            InlineKeyboardButton("📥 יצוא אקסל - מחלקות", callback_data="export_excel"),
+            InlineKeyboardButton("📦 מלאי ודוחות", callback_data="sub_reports"),
         ])
-        buttons.append([
-            InlineKeyboardButton("🎖️ חתמנו מול הגדוד", callback_data="battalion_add"),
-            InlineKeyboardButton("📤 זיכוי מול הגדוד", callback_data="battalion_return"),
-        ])
-        buttons.append([
-            InlineKeyboardButton("📋 מלאי מול הגדוד", callback_data="battalion_inventory"),
-            InlineKeyboardButton("📥 יצוא מול הגדוד", callback_data="export_battalion"),
-        ])
-        buttons.append([
-            InlineKeyboardButton("📥 יצוא חוסרים", callback_data="export_shortage"),
-        ])
+    else:
+        buttons.append([InlineKeyboardButton("📊 דוח מחלקה", callback_data="report")])
 
     if via_message:
         await update.message.reply_text("מה תרצה לעשות?", reply_markup=InlineKeyboardMarkup(buttons))
@@ -151,6 +205,54 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_main_menu(update, context, via_message=False)
 
 
+async def continue_same_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = context.user_data.get("action")
+    soldier_id = context.user_data.get("soldier_id")
+    if not action or not soldier_id:
+        return await show_main_menu(update, context, via_message=False)
+    buttons = _build_item_buttons(action, soldier_id)
+    if buttons is None:
+        await query.edit_message_text("החייל הזה לא מחזיק כרגע שום ציוד.",
+                                       reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+        return ConversationHandler.END
+    await query.edit_message_text("בחר פריט ציוד נוסף:", reply_markup=InlineKeyboardMarkup(buttons))
+    return CHOOSE_ITEM
+
+
+async def undo_specific_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # פורמט: undo_<action>_<soldier_id>_<item_id>_<qty>
+    parts = query.data.split("_")
+    action, soldier_id, item_id, qty = parts[1], int(parts[2]), int(parts[3]), int(parts[4])
+    tg_id = str(update.effective_user.id)
+    performer_name = update.effective_user.full_name
+    item_name = ops.get_equipment_type_name(item_id) or "הפריט"
+
+    try:
+        if action == "issue":
+            ops.return_equipment(soldier_id, item_id, qty, tg_id, performer_name, notes="ביטול פעולה")
+        elif action == "return":
+            ops.issue_equipment(soldier_id, item_id, qty, tg_id, performer_name, notes="ביטול פעולה")
+        elif action == "shortage":
+            ops.undo_shortage(soldier_id, item_id, qty, tg_id, performer_name)
+        else:
+            await query.edit_message_text("לא ניתן לבטל פעולה מסוג זה.",
+                                           reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+            return ConversationHandler.END
+
+        await query.edit_message_text(
+            f"✅ בוטל: {item_name} ({qty} יח')",
+            reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON])
+        )
+    except ValueError as e:
+        await query.edit_message_text(f"❌ לא ניתן לבטל: {e}", reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+    return ConversationHandler.END
+
+
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -158,6 +260,47 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["action"] = action
     tg_id = str(update.effective_user.id)
 
+    # -------- תת-תפריטים --------
+    if action == "sub_shortage":
+        buttons = [
+            [InlineKeyboardButton("🆘 דיווח חוסר", callback_data="shortage")],
+            [InlineKeyboardButton("📊 דוח חוסרים", callback_data="missing")],
+            [InlineKeyboardButton("📥 יצוא חוסרים", callback_data="export_shortage")],
+            MAIN_MENU_BUTTON,
+        ]
+        await query.edit_message_text("ניהול חוסרים:", reply_markup=InlineKeyboardMarkup(buttons))
+        return CHOOSE_ACTION
+
+    if action == "sub_soldiers":
+        buttons = [
+            [InlineKeyboardButton("➕ הוסף חייל", callback_data="add_soldier")],
+            [InlineKeyboardButton("🗑️ הסר חייל", callback_data="remove_soldier")],
+            MAIN_MENU_BUTTON,
+        ]
+        await query.edit_message_text("ניהול חיילים:", reply_markup=InlineKeyboardMarkup(buttons))
+        return CHOOSE_ACTION
+
+    if action == "sub_battalion":
+        buttons = [
+            [InlineKeyboardButton("🎖️ חתמנו מול הגדוד", callback_data="battalion_add")],
+            [InlineKeyboardButton("📤 זיכוי מול הגדוד", callback_data="battalion_return")],
+            [InlineKeyboardButton("📋 מלאי מול הגדוד", callback_data="battalion_inventory")],
+            [InlineKeyboardButton("📥 יצוא מול הגדוד", callback_data="export_battalion")],
+            MAIN_MENU_BUTTON,
+        ]
+        await query.edit_message_text("ציוד מול הגדוד:", reply_markup=InlineKeyboardMarkup(buttons))
+        return CHOOSE_ACTION
+
+    if action == "sub_reports":
+        buttons = [
+            [InlineKeyboardButton("📦 מצב מחסן", callback_data="warehouse")],
+            [InlineKeyboardButton("📥 יצוא אקסל - מחלקות", callback_data="export_excel")],
+            MAIN_MENU_BUTTON,
+        ]
+        await query.edit_message_text("מלאי ודוחות:", reply_markup=InlineKeyboardMarkup(buttons))
+        return CHOOSE_ACTION
+
+    # -------- פעולות בפועל --------
     if action == "report":
         buttons = [[InlineKeyboardButton(p["name"], callback_data=f"rp_{p['id']}")]
                    for p in ops.get_platoons()]
@@ -365,7 +508,7 @@ async def choose_platoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     platoon_id = int(data.split("_")[1])
     context.user_data["platoon_id"] = platoon_id
-    soldiers = ops.get_soldiers_by_platoon(platoon_id)
+    soldiers = ops.get_soldiers_by_platoon(platoon_id, recent_tg_id=str(tg_id))
     if not soldiers:
         await query.edit_message_text("אין חיילים רשומים במחלקה זו עדיין.",
                                        reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
@@ -397,25 +540,11 @@ async def choose_soldier(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return REMOVE_SOLDIER_CONFIRM
 
-    if action in ("return", "shortage"):
-        holdings = ops.get_soldier_holdings_with_ids(soldier_id)
-        if not holdings:
-            await query.edit_message_text(
-                "החייל הזה לא מחזיק כרגע שום ציוד.",
-                reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON])
-            )
-            return ConversationHandler.END
-        buttons = [[InlineKeyboardButton(f"{h['name']} (יש: {h['quantity']})", callback_data=f"it_{h['id']}")]
-                   for h in holdings]
-    else:
-        kit_buttons = [[InlineKeyboardButton(kit["label"], callback_data=kit_id)]
-                       for kit_id, kit in KITS.items()]
-        items = ops.get_equipment_types(layer="personal")
-        item_buttons = [[InlineKeyboardButton(i["name"], callback_data=f"it_{i['id']}")]
-                        for i in items]
-        buttons = kit_buttons + item_buttons
-
-    buttons.append(MAIN_MENU_BUTTON)
+    buttons = _build_item_buttons(action, soldier_id)
+    if buttons is None:
+        await query.edit_message_text("החייל הזה לא מחזיק כרגע שום ציוד.",
+                                       reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+        return ConversationHandler.END
     await query.edit_message_text("בחר פריט ציוד:", reply_markup=InlineKeyboardMarkup(buttons))
     return CHOOSE_ITEM
 
@@ -452,11 +581,16 @@ async def choose_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"✅ הוחתם {kit['label']}:\n\n" + "\n".join(lines)
         if missing:
             text += "\n\n⚠️ לא נמצאו במערכת (דולגו): " + ", ".join(missing)
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([CONTINUE_BUTTON, MAIN_MENU_BUTTON]))
         return ConversationHandler.END
 
     item_id = int(data.split("_")[1])
     context.user_data["item_id"] = item_id
+    item_name = ops.get_equipment_type_name(item_id)
+
+    if item_name not in QTY_ITEMS:
+        return await _finalize_item_action(update, context, qty=1)
+
     buttons = [
         [InlineKeyboardButton(str(n), callback_data=f"qty_{n}") for n in range(1, 6)],
         [InlineKeyboardButton(str(n), callback_data=f"qty_{n}") for n in range(6, 11)],
@@ -470,31 +604,7 @@ async def choose_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     qty = int(query.data.split("_")[1])
-
-    action = context.user_data["action"]
-    soldier_id = context.user_data["soldier_id"]
-    item_id = context.user_data["item_id"]
-    tg_id = str(update.effective_user.id)
-    performer_name = update.effective_user.full_name
-
-    try:
-        if action == "issue":
-            ops.issue_equipment(soldier_id, item_id, qty, tg_id, performer_name)
-            await query.edit_message_text(f"✅ הוחתם בהצלחה ({qty} יח')",
-                                           reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
-        elif action == "return":
-            ops.return_equipment(soldier_id, item_id, qty, tg_id, performer_name)
-            await query.edit_message_text(f"✅ זוכה בהצלחה ({qty} יח')",
-                                           reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
-        elif action == "shortage":
-            ops.report_shortage(soldier_id, item_id, qty, tg_id, performer_name)
-            await query.edit_message_text(f"✅ דווח חוסר ({qty} יח') - יופיע בדוח החוסרים",
-                                           reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
-    except ValueError as e:
-        await query.edit_message_text(f"❌ שגיאה: {e}",
-                                       reply_markup=InlineKeyboardMarkup([MAIN_MENU_BUTTON]))
-
-    return ConversationHandler.END
+    return await _finalize_item_action(update, context, qty)
 
 
 async def add_soldier_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -627,14 +737,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    common_entry_points = [
+        CommandHandler("start", start),
+        CallbackQueryHandler(back_to_menu, pattern="^menu$"),
+        CallbackQueryHandler(continue_same_soldier, pattern="^continue_soldier$"),
+        CallbackQueryHandler(undo_specific_action, pattern="^undo_"),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, start),
+    ]
+
     conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(back_to_menu, pattern="^menu$"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, start),
-        ],
+        entry_points=common_entry_points,
         states={
-            CHOOSE_ACTION: [CallbackQueryHandler(choose_action)],
+            CHOOSE_ACTION: [
+                CallbackQueryHandler(back_to_menu, pattern="^menu$"),
+                CallbackQueryHandler(choose_action),
+            ],
             CHOOSE_PLATOON: [
                 CallbackQueryHandler(back_to_menu, pattern="^menu$"),
                 CallbackQueryHandler(choose_platoon),
@@ -695,6 +812,8 @@ def main():
         fallbacks=[
             CommandHandler("cancel", cancel),
             CallbackQueryHandler(back_to_menu, pattern="^menu$"),
+            CallbackQueryHandler(continue_same_soldier, pattern="^continue_soldier$"),
+            CallbackQueryHandler(undo_specific_action, pattern="^undo_"),
             MessageHandler(filters.TEXT & ~filters.COMMAND, start),
         ],
     )

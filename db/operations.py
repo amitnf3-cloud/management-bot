@@ -223,6 +223,91 @@ def get_equipment_type_id_by_name(name):
         conn.close()
 
 
+def get_equipment_type_name(equipment_type_id):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM equipment_types WHERE id = %s", (equipment_type_id,))
+        row = cur.fetchone()
+        return row["name"] if row else None
+    finally:
+        conn.close()
+
+
+def get_recent_soldier_ids(performed_by_tg_id, platoon_id, limit=3):
+    """3 החיילים האחרונים שהמשתמש הזה עבד איתם, במחלקה הזו - כדי שיופיעו ראשונים ברשימה"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT t.soldier_id, MAX(t.created_at) AS last_at
+               FROM transactions t
+               JOIN soldiers s ON s.id = t.soldier_id
+               WHERE t.performed_by_tg_id = %s AND s.platoon_id = %s AND t.soldier_id IS NOT NULL
+               GROUP BY t.soldier_id
+               ORDER BY last_at DESC
+               LIMIT %s""",
+            (performed_by_tg_id, platoon_id, limit)
+        )
+        return [r["soldier_id"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_last_transaction(performed_by_tg_id):
+    """הפעולה האחרונה שביצע משתמש מסוים - לצורך 'בטל פעולה אחרונה'"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM transactions WHERE performed_by_tg_id = %s ORDER BY created_at DESC LIMIT 1",
+            (performed_by_tg_id,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def undo_shortage(soldier_id, equipment_type_id, quantity,
+                   performed_by_tg_id=None, performed_by_name=None):
+    """מבטל דיווח חוסר - מחזיר לחייל ומוחק את רשומת החוסר התואמת האחרונה"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, quantity FROM current_holdings WHERE soldier_id=%s AND equipment_type_id=%s",
+            (soldier_id, equipment_type_id)
+        )
+        existing = cur.fetchone()
+        if existing:
+            cur.execute(
+                "UPDATE current_holdings SET quantity = quantity + %s, updated_at = NOW() WHERE id=%s",
+                (quantity, existing["id"])
+            )
+        else:
+            cur.execute(
+                "INSERT INTO current_holdings (soldier_id, equipment_type_id, quantity) VALUES (%s, %s, %s)",
+                (soldier_id, equipment_type_id, quantity)
+            )
+        cur.execute(
+            """DELETE FROM shortages WHERE id = (
+                   SELECT id FROM shortages WHERE soldier_id=%s AND equipment_type_id=%s
+                   ORDER BY created_at DESC LIMIT 1
+               )""",
+            (soldier_id, equipment_type_id)
+        )
+        cur.execute(
+            """INSERT INTO transactions
+               (action, soldier_id, equipment_type_id, quantity, performed_by_tg_id, performed_by_name, notes)
+               VALUES ('issue', %s, %s, %s, %s, %s, 'ביטול דיווח חוסר')""",
+            (soldier_id, equipment_type_id, quantity, performed_by_tg_id, performed_by_name)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_or_create_battalion_equipment(name):
     """מחפש פריט ציוד 'מול הגדוד' לפי שם, ואם לא קיים - יוצר אותו (טקסט חופשי)"""
     conn = get_conn()
@@ -409,7 +494,7 @@ def get_platoons():
         conn.close()
 
 
-def get_soldiers_by_platoon(platoon_id):
+def get_soldiers_by_platoon(platoon_id, recent_tg_id=None):
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -417,9 +502,18 @@ def get_soldiers_by_platoon(platoon_id):
             "SELECT id, full_name FROM soldiers WHERE platoon_id = %s AND is_active = 1 ORDER BY full_name",
             (platoon_id,)
         )
-        return [dict(r) for r in cur.fetchall()]
+        soldiers = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+    if recent_tg_id:
+        recent_ids = get_recent_soldier_ids(recent_tg_id, platoon_id, limit=3)
+        if recent_ids:
+            by_id = {s["id"]: s for s in soldiers}
+            recent_sorted = [by_id[rid] for rid in recent_ids if rid in by_id]
+            rest = [s for s in soldiers if s["id"] not in set(recent_ids)]
+            return recent_sorted + rest
+    return soldiers
 
 
 def get_equipment_types(layer="personal"):
